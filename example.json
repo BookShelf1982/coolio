@@ -1,0 +1,23 @@
+{
+  "image": {
+    "width": 640,
+    "height": 480
+  },
+  "camera": {
+    "origin": [0.0, 0.0, 0.0],
+    "rotation": 0.0,
+    "fov": 70.0
+  },
+  "spheres": [
+    {
+      "radius": 1.0,
+      "origin": [0.0, 0.0, -4.0],
+      "color": [255, 255, 255]
+    },
+    {
+      "radius": 1.0,
+      "origin": [2.0, 0.0, -2.0],
+      "color": [180, 0, 0]
+    }
+  ]
+}
