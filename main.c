@@ -160,7 +160,7 @@ void renderImage(Image *img, Camera *cam, Sphere *spheres, size_t sphereCount) {
     HitInfo closestHitInfo = {.d = 1000.0f};
     for (unsigned int i = 0; i < sphereCount; i++) {
       HitInfo info = raySphereIntersect(ray, spheres[i]);
-      if (info.hit) {
+      if (info.hit && info.d > 0.0f) {
         if (info.d < closestHitInfo.d) {
           closestHitInfo = info;
         }
