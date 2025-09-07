@@ -8,6 +8,9 @@
 
 #define TO_RADIANS(d) (d * (M_PI / 180))
 
+#define CLAMP(value, min_val, max_val) \
+    ((value) < (min_val) ? (min_val) : ((value) > (max_val) ? (max_val) : (value)))
+
 typedef struct {
   float x, y, z;
 } Vector3;
@@ -58,21 +61,13 @@ typedef struct {
 typedef struct {
   Vector3 o;
   float r;
-  Color c;
+  Vector3 c;
 } Sphere;
 
 typedef struct {
   Vector3 o;
   Vector3 d;
 } Ray;
-
-typedef struct {
-  Vector3 p;
-  Vector3 n;
-  float d;
-  Color c;
-  bool hit;
-} HitInfo;
 
 typedef struct {
   Vector3 o;
@@ -106,7 +101,7 @@ void writePPMFile(const char *filepath, Image *img) {
   fclose(file);
 }
 
-HitInfo raySphereIntersect(Ray r, Sphere s) {
+bool raySphereIntersect(Ray r, Sphere s, float *d) {
   Vector3 oc = subV3(r.o, s.o);
   float a = dotV3(r.d, r.d);
   float b = 2.0f * dotV3(r.d, oc);
@@ -115,33 +110,32 @@ HitInfo raySphereIntersect(Ray r, Sphere s) {
 
   float t;
   if (discriminant < 0.0f) {
-    return (HitInfo) {0};
+    return false;
   } else if (discriminant == 0.0f) {
     t = (-b - sqrtf(discriminant)) / (2.0f * a);
   } else {
     float t1 = (-b - sqrtf(discriminant)) / (2.0f * a);
     float t2 = (-b + sqrtf(discriminant)) / (2.0f * a);
     t = t1 < t2 ? t1 : t2;
+    if (t < 0)
+      return false;
   }
 
-  HitInfo info = {0};
-  info.hit = true;
-  info.p = addV3(r.o, mulV3(r.d, t));
-  info.n = subV3(info.p, s.o);
-  info.c = s.c;
-  info.d = t;
-  return info;
+  if (d) *d = t;
+
+  return true;
 }
 
 void renderImage(Image *img, Camera *cam, Sphere *spheres, size_t sphereCount) {
   float imageAspectRatio = (float)img->width / (float)img->height;
+  float halfFOVInRadians = TO_RADIANS(cam->fov / 2.0f);
 
   for (size_t i = 0; i < (img->width * img->height); i++) {
     int x = i % img->width;
     int y = i / img->width;
 
-    float pX = (2.0f * (x + 0.5f) / (float)img->width - 1.0f) * tanf(TO_RADIANS(cam->fov / 2.0f)) * imageAspectRatio;
-    float pY = (1.0f - 2.0f * (y + 0.5f) / (float)img->height) * tanf(TO_RADIANS(cam->fov / 2.0f));
+    float pX = (2.0f * (x + 0.5f) / (float)img->width - 1.0f) * tanf(halfFOVInRadians) * imageAspectRatio;
+    float pY = (1.0f - 2.0f * (y + 0.5f) / (float)img->height) * tanf(halfFOVInRadians);
 
     Matrix4x4 camToWorld = (Matrix4x4) {
       {1.0f, 0.0f, 0.0f, 0.0f},
@@ -154,32 +148,68 @@ void renderImage(Image *img, Camera *cam, Sphere *spheres, size_t sphereCount) {
 
     Ray ray = {
       .o = cam->o,
-      .d = subV3(rP, cam->o)
+      .d = normalizeV3(subV3(rP, cam->o))
     };
 
-    HitInfo closestHitInfo = {.d = 1000.0f};
-    for (unsigned int i = 0; i < sphereCount; i++) {
-      HitInfo info = raySphereIntersect(ray, spheres[i]);
-      if (info.hit && info.d > 0.0f) {
-        if (info.d < closestHitInfo.d) {
-          closestHitInfo = info;
+    int closestSphere = -1;
+    float closestDist = 1000.0f;
+    for (unsigned int j = 0; j < sphereCount; j++) {
+      float dist = 0.0f;
+      if (raySphereIntersect(ray, spheres[j], &dist)) {
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestSphere = j;
         }
       }
     }
 
-    if (closestHitInfo.hit) {
-      img->data[i] = closestHitInfo.c;
+    if (closestSphere < 0) {
+      img->data[i] = (Color) {0};
       continue;
     }
 
+    const float shadowBias = 0.001f;
+    const Vector3 lightO = (Vector3) {25.0f, 100.0f, 50.0f};
+    Vector3 hitP = addV3(ray.o, mulV3(ray.d, closestDist));
+    Vector3 normal = normalizeV3(subV3(hitP, spheres[closestSphere].o));
+    Vector3 lightD = normalizeV3(subV3(lightO, hitP));
+
+    Ray shadowRay = {
+      .o = addV3(hitP, mulV3(normal, shadowBias)),
+      .d = normalizeV3(subV3(lightO, shadowRay.o))
+    };
+
+    bool visible = true;
+    for (unsigned int j = 0; j < sphereCount; j++) {
+      if (raySphereIntersect(shadowRay, spheres[j], NULL)) {
+        visible = false;
+        break;
+      }
+    }
+
+    const float intensity = 2.0f;
+    
+    float lambert = 0.0f;
+    if (visible) {
+      float dotResult = fmaxf(0.0f, dotV3(lightD, normal));
+      lambert = dotResult * intensity;
+    }
+
+    Vector3 finalColor = mulV3(spheres[closestSphere].c, lambert);
+
+    finalColor.x = CLAMP(finalColor.x, 0.0f, 1.0f);
+    finalColor.y = CLAMP(finalColor.y, 0.0f, 1.0f);
+    finalColor.z = CLAMP(finalColor.z, 0.0f, 1.0f);
+
+    Color final = (Color) {
+      (unsigned char)(finalColor.x * 255.0f),
+      (unsigned char)(finalColor.y * 255.0f),
+      (unsigned char)(finalColor.z * 255.0f)
+    };
+
+    img->data[i] = final;
+
     // output_value = (input_value - input_min) * (output_max - output_min) / (input_max - input_min) + output_min;
-    // unsigned char r = ray.d.x < 0.0f ? 0 : (unsigned char)((ray.d.x * 255.0f) / 1.0f);
-    // unsigned char g = ray.d.y < 0.0f ? 0 : (unsigned char)((ray.d.y * 255.0f) / 1.0f);
-    // unsigned char b = ray.d.z < 0.0f ? 0 : (unsigned char)((ray.d.z * 255.0f) / 1.0f);
-
-    Color c = {0,0,0};
-
-    img->data[i] = c;
   }
 }
 
@@ -305,21 +335,21 @@ bool readSceneJSON(const char *filepath, SceneInfo *info) {
           }
 
           cJSON *colorJSON = cJSON_GetObjectItem(sphereObjJSON, "color");
-          unsigned char *color = (unsigned char *)&info->spheres[i].c;
+          float *color = (float *)&info->spheres[i].c;
           if (cJSON_IsArray(colorJSON)) {
             int size = cJSON_GetArraySize(colorJSON);
             if (size >= 3) {
               for (int j = 0; j < 3; j++) {
                 cJSON *element = cJSON_GetArrayItem(colorJSON, j);
                 if (cJSON_IsNumber(element))
-                  color[j] = (unsigned char)cJSON_GetNumberValue(element);
+                  color[j] = (float)cJSON_GetNumberValue(element);
                 else
-                  color[j] = 0;
+                  color[j] = 0.0f;
               }
             }
           } else {
-            for (int j = 0; j < 3; j++) {
-              color[j] = 0;
+            for (int j = 0.0f; j < 3; j++) {
+              color[j] = 0.0f;
             }
           }
         }
@@ -339,9 +369,10 @@ void printSceneInfo(SceneInfo *info) {
   printf("    Rotation: %.2f\n    FOV: %.2f\n", info->cam.theta, info->cam.fov);
   printf("  Spheres info:\n");
   for (unsigned int i = 0; i < info->sphereCount; i++) {
-    printf("    Origin: [%.2f, %.2f, %.2f]\n", info->spheres[i].o.x, info->spheres[i].o.y, info->spheres[i].o.z);
-    printf("    Radius %.2f\n", info->spheres[i].r);
-    printf("    Color: [%d, %d, %d]\n", info->spheres[i].c.r, info->spheres[i].c.g, info->spheres[i].c.b);
+    printf("    Sphere %03d:\n", i);
+    printf("      Origin: [%.2f, %.2f, %.2f]\n", info->spheres[i].o.x, info->spheres[i].o.y, info->spheres[i].o.z);
+    printf("      Radius: %.2f\n", info->spheres[i].r);
+    printf("      Color: [%.2f, %.2f, %.2f]\n", info->spheres[i].c.x, info->spheres[i].c.y, info->spheres[i].c.z);
   }
 }
 
