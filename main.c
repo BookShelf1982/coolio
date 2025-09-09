@@ -27,6 +27,10 @@ Vector3 mulV3(Vector3 a, float s) {
   return (Vector3) {a.x * s, a.y * s, a.z * s};
 }
 
+Vector3 mulV3V3(Vector3 a, Vector3 b) {
+  return (Vector3) {a.x * b.x, a.y * b.y, a.z * b.z};
+}
+
 float magnitudeV3(Vector3 a) {
   return sqrtf((a.x * a.x) + (a.y * a.y) + (a.z * a.z));
 }
@@ -62,7 +66,14 @@ typedef struct {
   Vector3 o;
   float r;
   Vector3 c;
+  float s;
 } Sphere;
+
+typedef struct {
+  Vector3 o;
+  Vector3 c;
+  float i;
+} PointLight;
 
 typedef struct {
   Vector3 o;
@@ -83,8 +94,10 @@ typedef struct {
 typedef struct {
   unsigned int imgWidth, imgHeight;
   unsigned int sphereCount;
-  Sphere *spheres;
+  unsigned int pointLightCount;
   Camera cam;
+  Sphere *spheres;
+  PointLight *pointLights;
 } SceneInfo;
 
 void writePPMFile(const char *filepath, Image *img) {
@@ -126,9 +139,9 @@ bool raySphereIntersect(Ray r, Sphere s, float *d) {
   return true;
 }
 
-void renderImage(Image *img, Camera *cam, Sphere *spheres, size_t sphereCount) {
+void renderImage(Image *img, SceneInfo *info) {
   float imageAspectRatio = (float)img->width / (float)img->height;
-  float halfFOVInRadians = TO_RADIANS(cam->fov / 2.0f);
+  float halfFOVInRadians = TO_RADIANS(info->cam.fov / 2.0f);
 
   for (size_t i = 0; i < (img->width * img->height); i++) {
     int x = i % img->width;
@@ -145,17 +158,18 @@ void renderImage(Image *img, Camera *cam, Sphere *spheres, size_t sphereCount) {
     };
 
     Vector3 rP = mulV3M4(camToWorld, (Vector3){pX, pY, -1.0f});
+    Vector3 rD = normalizeV3(subV3(rP, info->cam.o));
 
     Ray ray = {
-      .o = cam->o,
-      .d = normalizeV3(subV3(rP, cam->o))
+      .o = info->cam.o,
+      .d = rD
     };
 
     int closestSphere = -1;
     float closestDist = 1000.0f;
-    for (unsigned int j = 0; j < sphereCount; j++) {
+    for (unsigned int j = 0; j < info->sphereCount; j++) {
       float dist = 0.0f;
-      if (raySphereIntersect(ray, spheres[j], &dist)) {
+      if (raySphereIntersect(ray, info->spheres[j], &dist)) {
         if (dist < closestDist) {
           closestDist = dist;
           closestSphere = j;
@@ -169,33 +183,39 @@ void renderImage(Image *img, Camera *cam, Sphere *spheres, size_t sphereCount) {
     }
 
     const float shadowBias = 0.001f;
-    const Vector3 lightO = (Vector3) {25.0f, 100.0f, 50.0f};
+
     Vector3 hitP = addV3(ray.o, mulV3(ray.d, closestDist));
-    Vector3 normal = normalizeV3(subV3(hitP, spheres[closestSphere].o));
-    Vector3 lightD = normalizeV3(subV3(lightO, hitP));
+    Vector3 normal = normalizeV3(subV3(hitP, info->spheres[closestSphere].o));
+    Vector3 finalColor = (Vector3) {0};
 
-    Ray shadowRay = {
-      .o = addV3(hitP, mulV3(normal, shadowBias)),
-      .d = normalizeV3(subV3(lightO, shadowRay.o))
-    };
+    for (unsigned int j = 0; j < info->pointLightCount; j++) {
+      Vector3 lightD = normalizeV3(subV3(info->pointLights[j].o, hitP));
 
-    bool visible = true;
-    for (unsigned int j = 0; j < sphereCount; j++) {
-      if (raySphereIntersect(shadowRay, spheres[j], NULL)) {
-        visible = false;
-        break;
+      Ray shadowRay = {
+        .o = addV3(hitP, mulV3(normal, shadowBias)),
+        .d = normalizeV3(subV3(info->pointLights[j].o, shadowRay.o))
+      };
+
+      bool visible = true;
+      for (unsigned int j = 0; j < info->sphereCount; j++) {
+        if (raySphereIntersect(shadowRay, info->spheres[j], NULL)) {
+          visible = false;
+          break;
+        }
       }
-    }
+      
+      float lightDist = magnitudeV3(subV3(hitP, info->pointLights[j].o));
+      float falloff = 1.0f / (lightDist * lightDist);
 
-    const float intensity = 2.0f;
-    
-    float lambert = 0.0f;
-    if (visible) {
-      float dotResult = fmaxf(0.0f, dotV3(lightD, normal));
-      lambert = dotResult * intensity;
-    }
+      float lambert = 0.0f;
+      if (visible) {
+        float dotResult = fmaxf(0.0f, dotV3(lightD, normal));
+        lambert = dotResult * (info->pointLights[j].i * falloff);
+      }
 
-    Vector3 finalColor = mulV3(spheres[closestSphere].c, lambert);
+
+      finalColor = addV3(mulV3V3(info->spheres[closestSphere].c, mulV3(info->pointLights[j].c, lambert)), finalColor);
+    }
 
     finalColor.x = CLAMP(finalColor.x, 0.0f, 1.0f);
     finalColor.y = CLAMP(finalColor.y, 0.0f, 1.0f);
@@ -277,82 +297,140 @@ bool readSceneJSON(const char *filepath, SceneInfo *info) {
         }
       }
     }
+  }
 
-    cJSON *imgJSON = cJSON_GetObjectItem(sceneJSON, "image");
-    if (cJSON_IsObject(imgJSON)) {
-      cJSON *widthJSON = cJSON_GetObjectItem(imgJSON, "width");
-      if (cJSON_IsNumber(widthJSON)) {
-        info->imgWidth = (unsigned int)cJSON_GetNumberValue(widthJSON);
-      } else {
-        fprintf(stderr, "WARNING: image width were not configured.\nSetting image width to 128.\n");
-        info->imgWidth = 128;
-      }
-
-      cJSON *heightJSON = cJSON_GetObjectItem(imgJSON, "height");
-      if (cJSON_IsNumber(heightJSON)) {
-        info->imgHeight = (unsigned int)cJSON_GetNumberValue(heightJSON);
-      } else {
-        fprintf(stderr, "WARNING: image height were not configured.\nSetting image height to 128.\n");
-        info->imgHeight = 128;
-      }
+  cJSON *imgJSON = cJSON_GetObjectItem(sceneJSON, "image");
+  if (cJSON_IsObject(imgJSON)) {
+    cJSON *widthJSON = cJSON_GetObjectItem(imgJSON, "width");
+    if (cJSON_IsNumber(widthJSON)) {
+      info->imgWidth = (unsigned int)cJSON_GetNumberValue(widthJSON);
     } else {
-      fprintf(stderr, "WARNING: image width and height were not configured.\nSetting image width and height to 128.\n");
-      info->imgWidth = info->imgHeight = 128;
+      fprintf(stderr, "WARNING: image width were not configured.\nSetting image width to 128.\n");
+      info->imgWidth = 128;
     }
 
-    cJSON *sphereArrJSON = cJSON_GetObjectItem(sceneJSON, "spheres");
-    if (cJSON_IsArray(sphereArrJSON)) {
-      int size = cJSON_GetArraySize(sphereArrJSON);
-      info->sphereCount = size;
-      info->spheres = (Sphere *)malloc(size * sizeof(Sphere));
-      for (int i = 0; i < size; i++) {
-        cJSON *sphereObjJSON = cJSON_GetArrayItem(sphereArrJSON, i);
-        if (cJSON_IsObject(sphereObjJSON)) {
-          cJSON *originJSON = cJSON_GetObjectItem(sphereObjJSON, "origin");
-          float *origin = (float *)&info->spheres[i].o;
-          if (cJSON_IsArray(originJSON)) {
-            int size = cJSON_GetArraySize(originJSON);
-            if (size >= 3) {
-              for (int j = 0; j < 3; j++) {
-                cJSON *element = cJSON_GetArrayItem(originJSON, j);
-                if (cJSON_IsNumber(element))
-                  origin[j] = (float)cJSON_GetNumberValue(element);
-                else
-                  origin[j] = 0.0f;
-              }
-            }
-          } else {
-            for (int j = 0; j < 3; j++) {
-              origin[j] = 0.0f;
-            }
-          }
-          
-          cJSON *raduisJSON = cJSON_GetObjectItem(sphereObjJSON, "radius");
-          if (cJSON_IsNumber(raduisJSON)) {
-            info->spheres[i].r = (float)cJSON_GetNumberValue(raduisJSON);
-          } else {
-            info->spheres[i].r = 0.5f;
-          }
+    cJSON *heightJSON = cJSON_GetObjectItem(imgJSON, "height");
+    if (cJSON_IsNumber(heightJSON)) {
+      info->imgHeight = (unsigned int)cJSON_GetNumberValue(heightJSON);
+    } else {
+      fprintf(stderr, "WARNING: image height were not configured.\nSetting image height to 128.\n");
+      info->imgHeight = 128;
+    }
+  } else {
+    fprintf(stderr, "WARNING: image width and height were not configured.\nSetting image width and height to 128.\n");
+    info->imgWidth = info->imgHeight = 128;
+  }
 
-          cJSON *colorJSON = cJSON_GetObjectItem(sphereObjJSON, "color");
-          float *color = (float *)&info->spheres[i].c;
-          if (cJSON_IsArray(colorJSON)) {
-            int size = cJSON_GetArraySize(colorJSON);
-            if (size >= 3) {
-              for (int j = 0; j < 3; j++) {
-                cJSON *element = cJSON_GetArrayItem(colorJSON, j);
-                if (cJSON_IsNumber(element))
-                  color[j] = (float)cJSON_GetNumberValue(element);
-                else
-                  color[j] = 0.0f;
-              }
+  cJSON *sphereArrJSON = cJSON_GetObjectItem(sceneJSON, "spheres");
+  cJSON *pointLightArrJSON = cJSON_GetObjectItem(sceneJSON, "point_lights");
+  int sphereArrSize = cJSON_GetArraySize(sphereArrJSON);
+  info->sphereCount = sphereArrSize;
+  int pointLightArrSize = cJSON_GetArraySize(pointLightArrJSON);
+  info->pointLightCount = pointLightArrSize;
+
+  info->spheres = (Sphere *)malloc((sphereArrSize * sizeof(Sphere)) + (pointLightArrSize * sizeof(PointLight)));
+  info->pointLights = (PointLight *)&info->spheres[sphereArrSize];
+
+  if (cJSON_IsArray(sphereArrJSON)) {
+    for (int i = 0; i < sphereArrSize; i++) {
+      cJSON *sphereObjJSON = cJSON_GetArrayItem(sphereArrJSON, i);
+      if (cJSON_IsObject(sphereObjJSON)) {
+        cJSON *originJSON = cJSON_GetObjectItem(sphereObjJSON, "origin");
+        float *origin = (float *)&info->spheres[i].o;
+        if (cJSON_IsArray(originJSON)) {
+          int size = cJSON_GetArraySize(originJSON);
+          if (size >= 3) {
+            for (int j = 0; j < 3; j++) {
+              cJSON *element = cJSON_GetArrayItem(originJSON, j);
+              if (cJSON_IsNumber(element))
+                origin[j] = (float)cJSON_GetNumberValue(element);
+              else
+                origin[j] = 0.0f;
             }
-          } else {
-            for (int j = 0.0f; j < 3; j++) {
-              color[j] = 0.0f;
+          }
+        } else {
+          for (int j = 0; j < 3; j++) {
+            origin[j] = 0.0f;
+          }
+        }
+        
+        cJSON *raduisJSON = cJSON_GetObjectItem(sphereObjJSON, "radius");
+        if (cJSON_IsNumber(raduisJSON)) {
+          info->spheres[i].r = (float)cJSON_GetNumberValue(raduisJSON);
+        } else {
+          info->spheres[i].r = 0.5f;
+        }
+
+        cJSON *colorJSON = cJSON_GetObjectItem(sphereObjJSON, "color");
+        float *color = (float *)&info->spheres[i].c;
+        if (cJSON_IsArray(colorJSON)) {
+          int size = cJSON_GetArraySize(colorJSON);
+          if (size >= 3) {
+            for (int j = 0; j < 3; j++) {
+              cJSON *element = cJSON_GetArrayItem(colorJSON, j);
+              if (cJSON_IsNumber(element))
+                color[j] = (float)cJSON_GetNumberValue(element);
+              else
+                color[j] = 0.0f;
+            }
+          }
+        } else {
+          for (int j = 0.0f; j < 3; j++) {
+            color[j] = 0.0f;
+          }
+        }
+      }
+    }
+  }
+
+  if (cJSON_IsArray(pointLightArrJSON)) {
+    for (int i = 0; i < pointLightArrSize; i++) {
+      cJSON *pointLightObjJSON = cJSON_GetArrayItem(pointLightArrJSON, i);
+      float *origin = (float *)&info->pointLights[i].o;
+      if (cJSON_IsObject(pointLightObjJSON)) {
+        cJSON *originJSON = cJSON_GetObjectItem(pointLightObjJSON, "origin");
+        if (cJSON_IsArray(originJSON)) {
+          int size = cJSON_GetArraySize(originJSON);
+          if (size >= 3) {
+            for (int j = 0; j < 3; j++) {
+              cJSON *element = cJSON_GetArrayItem(originJSON, j);
+              if (cJSON_IsNumber(element))
+                origin[j] = (float)cJSON_GetNumberValue(element);
+              else
+                origin[j] = 0.0f;
             }
           }
         }
+      } else {
+        for (int j = 0; j < 3; j++) {
+          origin[j] = 0.0f;
+        }
+      }
+      
+      cJSON *colorJSON = cJSON_GetObjectItem(pointLightObjJSON, "color");
+      float *color = (float *)&info->pointLights[i].c;
+      if (cJSON_IsArray(colorJSON)) {
+        int size = cJSON_GetArraySize(colorJSON);
+        if (size >= 3) {
+          for (int j = 0; j < 3; j++) {
+            cJSON *element = cJSON_GetArrayItem(colorJSON, j);
+            if (cJSON_IsNumber(element))
+              color[j] = (float)cJSON_GetNumberValue(element);
+            else
+              color[j] = 0.0f;
+          }
+        }
+      } else {
+        for (int j = 0.0f; j < 3; j++) {
+          color[j] = 0.0f;
+        }
+      }
+
+      cJSON *intensityJSON = cJSON_GetObjectItem(pointLightObjJSON, "intensity");
+      if (cJSON_IsNumber(intensityJSON)) {
+        info->pointLights[i].i = (float)cJSON_GetNumberValue(intensityJSON);
+      } else {
+        info->pointLights[i].i = 1.0f;
       }
     }
   }
@@ -409,7 +487,7 @@ int main(int argc, const char **argv) {
     .data = malloc(img.width * img.height * sizeof(Color))
   };
 
-  renderImage(&img, &sceneInfo.cam, sceneInfo.spheres, sceneInfo.sphereCount);
+  renderImage(&img, &sceneInfo);
 
   writePPMFile("output.ppm", &img);
 

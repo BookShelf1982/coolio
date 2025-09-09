@@ -6,7 +6,7 @@
   "camera": {
     "origin": [0.0, 0.0, 0.0],
     "rotation": 0.0,
-    "fov": 70.0
+    "fov": 90.0
   },
   "spheres": [
     {
@@ -16,22 +16,15 @@
     },
     {
       "radius": 1,
-      "origin": [-2, 0, -4],
-      "color": [0, 0, 1]
-    },
-    {
-      "radius": 1,
-      "origin": [1, 0, -3],
-      "color": [0, 1, 0],
-      "specular": 10
+      "origin": [0, 0, -4],
+      "color": [1, 0.5, 1]
     }
   ],
   "point_lights": [
     {
-      "origin": [0, 0, 0],
-      "range": 2,
-      "color": [1, 1, 1],
-      "intensity": 1
+      "origin": [100, 100, 100],
+      "color": [0.92, 0.94, 0.64],
+      "intensity": 50000
     }
   ]
 }
